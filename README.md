@@ -133,6 +133,8 @@ kubectl apply -f k8s/ksvc.yaml
 kubectl get ksvc buildings-cng -n knative-pool
 ```
 
+macOS の Docker Desktop だけで local 完結に動かす手順は [docs/knative-on-macos.md](./docs/knative-on-macos.md) を参照。 Cloudflare Tunnel や外部 Linux ホストは要らず、 `kn quickstart kind` から始めて 5 分で立つ。 k8s / Knative を初めて触る人向けの最小経路として用意してある。
+
 ksvc URL は domain-template に従って `<name>.<base-domain>` で自動生成され、このプロジェクトでは `buildings-cng.yuiseki.com` になる。
 
 ## 使う側のクエリパラメータ
