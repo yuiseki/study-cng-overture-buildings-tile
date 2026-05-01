@@ -1,0 +1,344 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>buildings-cng viewer</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link
+      href="https://unpkg.com/maplibre-gl@5/dist/maplibre-gl.css"
+      rel="stylesheet"
+    />
+    <style>
+      :root {
+        color-scheme: light;
+      }
+      body {
+        margin: 0;
+        padding: 0;
+        font-family:
+          system-ui,
+          -apple-system,
+          sans-serif;
+      }
+      #map {
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        width: 100%;
+      }
+      .panel {
+        position: absolute;
+        z-index: 1;
+        background: rgba(255, 255, 255, 0.92);
+        padding: 10px 14px;
+        border-radius: 6px;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+        font-size: 13px;
+      }
+      #info {
+        top: 10px;
+        left: 10px;
+        max-width: 320px;
+      }
+      #info h1 {
+        margin: 0 0 6px 0;
+        font-size: 14px;
+      }
+      #info code {
+        background: #eee;
+        padding: 1px 4px;
+        border-radius: 3px;
+        font-size: 12px;
+      }
+      #info dl {
+        margin: 6px 0 0 0;
+      }
+      #info dt {
+        font-weight: 600;
+        margin-top: 4px;
+        color: #555;
+      }
+      #info dd {
+        margin: 0 0 2px 0;
+      }
+      #legend {
+        bottom: 30px;
+        left: 10px;
+        font-size: 12px;
+      }
+      .legend-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin: 3px 0;
+      }
+      .legend-swatch {
+        width: 14px;
+        height: 14px;
+        border-radius: 3px;
+        border: 1px solid rgba(0, 0, 0, 0.3);
+      }
+      #controls {
+        top: 10px;
+        right: 50px;
+        font-size: 12px;
+        min-width: 220px;
+      }
+      #controls label {
+        display: block;
+        margin: 4px 0;
+      }
+      #controls input[type="range"] {
+        vertical-align: middle;
+        width: 140px;
+      }
+      #controls .value {
+        display: inline-block;
+        min-width: 38px;
+        text-align: right;
+        font-variant-numeric: tabular-nums;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="map"></div>
+
+    <div id="info" class="panel">
+      <h1>buildings-cng</h1>
+      <dl id="meta">
+        <dt>server</dt>
+        <dd><code id="server-url"></code></dd>
+        <dt>data</dt>
+        <dd>Overture Maps <code id="release"></code> (theme=buildings)</dd>
+        <dt>filter</dt>
+        <dd><code id="current-filter"></code></dd>
+      </dl>
+      <p style="margin: 8px 0 0 0; color: #666; font-size: 11px">
+        click building for properties · drag/pinch to navigate · use slider
+        to filter by minimum height
+      </p>
+    </div>
+
+    <div id="legend" class="panel">
+      <div style="font-weight: 600; margin-bottom: 4px">building height</div>
+      <div id="legend-rows"></div>
+    </div>
+
+    <div id="controls" class="panel">
+      <label>
+        min height
+        <input type="range" id="height" min="0" max="200" step="5" value="0" />
+        <span class="value"><span id="height-value">0</span>m</span>
+      </label>
+      <label>
+        opacity
+        <input type="range" id="opacity" min="0" max="100" value="80" />
+      </label>
+    </div>
+
+    <script src="https://unpkg.com/maplibre-gl@5/dist/maplibre-gl.js"></script>
+    <script>
+      const params = new URLSearchParams(window.location.search);
+      // Production default: Knative ksvc on z-t (via Cloudflare Tunnel).
+      // Override via ?server=http://localhost:8006 for local dev.
+      // Trim trailing slashes so users can paste either form.
+      const tileServer = (
+        params.get("server") || "https://buildings-cng.yuiseki.com"
+      ).replace(/\/+$/, "");
+      const initialHeight = parseFloat(params.get("height") || "0");
+
+      // Preset views: Manhattan (default) shows the dramatic skyline,
+      // Tokyo (?city=tokyo) gives a denser low-mid urban fabric.
+      const PRESET_VIEWS = {
+        manhattan: { center: [-73.985, 40.758], zoom: 15.5, pitch: 50 },
+        tokyo: { center: [139.7625, 35.681], zoom: 15.2, pitch: 50 },
+      };
+      const city = params.get("city") || "manhattan";
+      const view = PRESET_VIEWS[city] || PRESET_VIEWS.manhattan;
+
+      document.getElementById("server-url").textContent = tileServer;
+
+      // Height-band color ramp. Used by both the fill-extrusion paint
+      // expression and the legend rendering, so the legend stays in sync.
+      const HEIGHT_BANDS = [
+        { upTo: 5, color: "#74c476", label: "0 – 5 m" },
+        { upTo: 15, color: "#fdd835", label: "5 – 15 m" },
+        { upTo: 40, color: "#fb8c00", label: "15 – 40 m" },
+        { upTo: 100, color: "#e53935", label: "40 – 100 m" },
+        { upTo: Infinity, color: "#6a1b9a", label: "100 m +" },
+      ];
+
+      function buildTilesUrl(minHeight) {
+        const qs = minHeight > 0 ? `?filter_by_height=${minHeight}m` : "";
+        return `${tileServer}/tiles/{z}/{x}/{y}.mvt${qs}`;
+      }
+
+      function setFilterDisplay(minHeight) {
+        const text =
+          minHeight > 0 ? `filter_by_height=${minHeight}m` : "(none)";
+        document.getElementById("current-filter").textContent = text;
+        document.getElementById("height-value").textContent = String(minHeight);
+      }
+
+      // Show release version asynchronously (non-blocking).
+      fetch(`${tileServer}/health`)
+        .then((r) => r.json())
+        .then((j) => {
+          document.getElementById("release").textContent = j.release || "?";
+        })
+        .catch(() => {
+          document.getElementById("release").textContent = "(server offline)";
+        });
+
+      const map = new maplibregl.Map({
+        container: "map",
+        // Relative path so the viewer works at any GitHub Pages base path
+        // (e.g. /study-cng-overture-buildings-tile/) and at local /docs/.
+        style: "./style.json",
+        center: view.center,
+        zoom: view.zoom,
+        pitch: view.pitch,
+        bearing: 0,
+        hash: true,
+      });
+      map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), "top-right");
+      map.addControl(new maplibregl.ScaleControl(), "bottom-left");
+
+      let currentMinHeight = initialHeight;
+
+      map.on("load", () => {
+        map.addSource("buildings", {
+          type: "vector",
+          tiles: [buildTilesUrl(currentMinHeight)],
+          minzoom: 12,
+          maxzoom: 16,
+        });
+
+        // fill-extrusion gives the 3D skyline effect that makes
+        // `filter_by_height` visually obvious.
+        const heightExpr = ["coalesce", ["get", "height"], 3];
+        const colorExpr = [
+          "step",
+          heightExpr,
+          HEIGHT_BANDS[0].color,
+          HEIGHT_BANDS[0].upTo,
+          HEIGHT_BANDS[1].color,
+          HEIGHT_BANDS[1].upTo,
+          HEIGHT_BANDS[2].color,
+          HEIGHT_BANDS[2].upTo,
+          HEIGHT_BANDS[3].color,
+          HEIGHT_BANDS[3].upTo,
+          HEIGHT_BANDS[4].color,
+        ];
+
+        map.addLayer({
+          id: "buildings-fill",
+          type: "fill-extrusion",
+          source: "buildings",
+          "source-layer": "buildings",
+          paint: {
+            "fill-extrusion-color": colorExpr,
+            "fill-extrusion-height": heightExpr,
+            "fill-extrusion-base": 0,
+            "fill-extrusion-opacity": 0.8,
+          },
+        });
+
+        renderLegend();
+        wireControls();
+        wireClickPopup();
+        setFilterDisplay(currentMinHeight);
+      });
+
+      function renderLegend() {
+        const root = document.getElementById("legend-rows");
+        for (const b of HEIGHT_BANDS) {
+          const row = document.createElement("div");
+          row.className = "legend-row";
+          row.innerHTML = `
+            <div class="legend-swatch" style="background: ${b.color}"></div>
+            <div>${b.label}</div>
+          `;
+          root.appendChild(row);
+        }
+      }
+
+      function wireControls() {
+        const heightInput = document.getElementById("height");
+        const opacityInput = document.getElementById("opacity");
+        heightInput.value = String(currentMinHeight);
+
+        let debounce;
+        heightInput.addEventListener("input", (e) => {
+          const v = parseFloat(e.target.value);
+          currentMinHeight = v;
+          setFilterDisplay(v);
+          // Debounce the source-update so dragging the slider doesn't
+          // flood the server with abandoned tile requests.
+          clearTimeout(debounce);
+          debounce = setTimeout(() => {
+            const newUrl = buildTilesUrl(currentMinHeight);
+            const src = map.getSource("buildings");
+            if (src && typeof src.setTiles === "function") {
+              src.setTiles([newUrl]);
+            } else {
+              // Fallback for older maplibre: remove + re-add the source.
+              map.removeLayer("buildings-fill");
+              map.removeSource("buildings");
+              map.addSource("buildings", {
+                type: "vector",
+                tiles: [newUrl],
+                minzoom: 12,
+                maxzoom: 16,
+              });
+              map.addLayer({
+                id: "buildings-fill",
+                type: "fill-extrusion",
+                source: "buildings",
+                "source-layer": "buildings",
+                paint: map.getPaintProperty
+                  ? undefined
+                  : { "fill-extrusion-opacity": 0.8 },
+              });
+            }
+          }, 250);
+        });
+
+        opacityInput.addEventListener("input", (e) => {
+          const v = parseFloat(e.target.value) / 100;
+          map.setPaintProperty("buildings-fill", "fill-extrusion-opacity", v);
+        });
+      }
+
+      function wireClickPopup() {
+        const popup = new maplibregl.Popup({ closeButton: true });
+        map.on("click", (e) => {
+          const features = map.queryRenderedFeatures(e.point, {
+            layers: ["buildings-fill"],
+          });
+          if (features.length === 0) return;
+          const f = features[0];
+          const rows = Object.entries(f.properties)
+            .map(([k, v]) => `<dt><b>${k}</b></dt><dd>${v}</dd>`)
+            .join("");
+          popup
+            .setLngLat(e.lngLat)
+            .setHTML(
+              `<div style="font-size:12px"><b>building</b><dl style="margin:4px 0 0 0">${rows}</dl></div>`,
+            )
+            .addTo(map);
+        });
+        map.on(
+          "mouseenter",
+          "buildings-fill",
+          () => (map.getCanvas().style.cursor = "pointer"),
+        );
+        map.on(
+          "mouseleave",
+          "buildings-fill",
+          () => (map.getCanvas().style.cursor = ""),
+        );
+      }
+    </script>
+  </body>
+</html>
